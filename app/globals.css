@@ -790,6 +790,27 @@ input:focus-visible {
   font-weight: 700;
 }
 
+.patient-list-button {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-self: end;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid #dce4dc;
+  border-radius: 14px;
+  background: white;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.patient-list-button span {
+  font-size: 17px;
+  line-height: 1;
+}
+
 .progress-track {
   height: 4px;
   margin: 0 20px;
@@ -995,7 +1016,8 @@ input:focus-visible {
 
 .navigate-button,
 .done-button,
-.start-care-button {
+.start-care-button,
+.not-seen-button {
   display: flex;
   width: 100%;
   min-height: 67px;
@@ -1005,6 +1027,17 @@ input:focus-visible {
   border-radius: 20px;
   cursor: pointer;
   text-decoration: none;
+}
+
+.patient-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.patient-action-row button {
+  padding: 0 8px;
+  line-height: 1.15;
 }
 
 .navigate-button {
@@ -1078,6 +1111,19 @@ input:focus-visible {
   font-size: 12px;
 }
 
+.not-seen-button {
+  border: 2px solid #d6a13f;
+  background: #fff9eb;
+  color: #765514;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.not-seen-button span {
+  font-size: 22px;
+  line-height: 1;
+}
+
 .care-timer {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1137,6 +1183,11 @@ input:focus-visible {
   color: var(--mint);
 }
 
+.revisit-symbol {
+  background: #fff2d5;
+  color: #896315;
+}
+
 .empty-state h1,
 .complete-state h1 {
   margin: 0;
@@ -1176,6 +1227,158 @@ input:focus-visible {
   background: white;
   text-align: center;
   animation: rise-up 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.patient-list-sheet {
+  display: flex;
+  width: min(100%, 680px);
+  max-height: min(88svh, 820px);
+  flex-direction: column;
+  padding: 12px 18px max(12px, env(safe-area-inset-bottom));
+  border-radius: 30px 30px 0 0;
+  background: var(--cream);
+  animation: rise-up 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.patient-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.patient-list-heading .eyebrow {
+  margin-bottom: 3px;
+}
+
+.patient-list-heading h2 {
+  margin: 0;
+  font-size: 25px;
+  letter-spacing: -0.04em;
+}
+
+.close-sheet-button {
+  display: grid;
+  flex: 0 0 46px;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 0;
+  border-radius: 15px;
+  background: #e5eae3;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.patient-list-help {
+  margin: 10px 0 14px;
+  color: #6c7e7a;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.patient-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0 1px 5px;
+  overflow-y: auto;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+
+.patient-list-item {
+  display: grid;
+  width: 100%;
+  min-height: 72px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 12px;
+  border: 1px solid #e1e7df;
+  border-radius: 18px;
+  background: white;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.patient-list-item.is-active {
+  border-color: #91ab51;
+  box-shadow: inset 0 0 0 1px #91ab51;
+}
+
+.patient-list-item.is-deferred {
+  border-color: #e6c378;
+  background: #fffaf0;
+}
+
+.patient-list-item.is-completed {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.patient-order {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 12px;
+  background: #eef2e8;
+  color: #60736e;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.is-active .patient-order {
+  background: var(--forest);
+  color: var(--mint);
+}
+
+.patient-list-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.patient-list-copy strong,
+.patient-list-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.patient-list-copy strong {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.patient-list-copy small {
+  color: #748783;
+  font-size: 10px;
+}
+
+.patient-status {
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: #eef2ec;
+  color: #647772;
+  font-size: 9px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.is-active .patient-status {
+  background: #e8f2d3;
+  color: #567127;
+}
+
+.is-deferred .patient-status {
+  background: #ffedc5;
+  color: #805c13;
 }
 
 .sheet-handle {
@@ -1294,6 +1497,11 @@ input:focus-visible {
     margin-bottom: 20px;
     border-radius: 30px;
   }
+
+  .patient-list-sheet {
+    margin-bottom: 20px;
+    border-radius: 30px;
+  }
 }
 
 @media (max-width: 390px) {
@@ -1346,6 +1554,25 @@ input:focus-visible {
   .action-dock {
     padding-right: 15px;
     padding-left: 15px;
+  }
+
+  .patient-action-row {
+    gap: 7px;
+  }
+
+  .patient-action-row button {
+    gap: 7px;
+    font-size: 12px;
+  }
+
+  .patient-list-sheet {
+    padding-right: 13px;
+    padding-left: 13px;
+  }
+
+  .patient-status {
+    padding-right: 6px;
+    padding-left: 6px;
   }
 }
 

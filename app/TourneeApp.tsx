@@ -13,12 +13,19 @@ import {
 
 type Screen = "accueil" | "tournee" | "import";
 type Progress = Record<TourneeId, string[]>;
+type DeferredPatients = Record<TourneeId, string[]>;
 type DurationHistory = Record<string, number[]>;
+type NavigationPrompt = {
+  patient: Patient;
+  reason: "completed" | "selected" | "deferred";
+};
 
 const STORAGE_DATA = "ma-tournee-idel:data:v1";
 const STORAGE_PROGRESS = "ma-tournee-idel:progress:v1";
+const STORAGE_DEFERRED = "ma-tournee-idel:deferred:v1";
 const STORAGE_DURATIONS = "ma-tournee-idel:durations:v1";
 const EMPTY_PROGRESS: Progress = { matin: [], soir: [] };
+const EMPTY_DEFERRED: DeferredPatients = { matin: [], soir: [] };
 
 function createId(route: TourneeId, index: number) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -76,6 +83,24 @@ function formatTimer(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function nextPatientInOriginalOrder(
+  patients: Patient[],
+  completedIds: string[],
+  deferredIds: string[],
+  excludedId?: string,
+) {
+  const remaining = patients.filter(
+    (patient) =>
+      patient.id !== excludedId && !completedIds.includes(patient.id),
+  );
+
+  return (
+    remaining.find((patient) => !deferredIds.includes(patient.id)) ??
+    remaining[0] ??
+    null
+  );
 }
 
 function patientFromRow(
@@ -153,12 +178,16 @@ export function TourneeApp() {
   const [screen, setScreen] = useState<Screen>("accueil");
   const [tournees, setTournees] = useState<Tournees>(DEMO_TOURNEES);
   const [progress, setProgress] = useState<Progress>(EMPTY_PROGRESS);
+  const [deferredPatients, setDeferredPatients] =
+    useState<DeferredPatients>(EMPTY_DEFERRED);
   const [durationHistory, setDurationHistory] = useState<DurationHistory>({});
   const [selectedRoute, setSelectedRoute] = useState<TourneeId>("matin");
   const [activePatientId, setActivePatientId] = useState<string | null>(null);
   const [careStartedAt, setCareStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [navigationPrompt, setNavigationPrompt] = useState<Patient | null>(null);
+  const [navigationPrompt, setNavigationPrompt] =
+    useState<NavigationPrompt | null>(null);
+  const [patientListOpen, setPatientListOpen] = useState(false);
   const [importMessage, setImportMessage] = useState<string>("");
   const [importError, setImportError] = useState<string>("");
   const [isImporting, setIsImporting] = useState(false);
@@ -168,6 +197,7 @@ export function TourneeApp() {
   useEffect(() => {
     let savedData: Tournees | null = null;
     let savedProgress: Progress | null = null;
+    let savedDeferred: DeferredPatients | null = null;
     let savedDurations: DurationHistory | null = null;
     let savedRoute: TourneeId | null = null;
     let cancelled = false;
@@ -175,9 +205,13 @@ export function TourneeApp() {
     try {
       const storedData = localStorage.getItem(STORAGE_DATA);
       const storedProgress = localStorage.getItem(STORAGE_PROGRESS);
+      const storedDeferred = localStorage.getItem(STORAGE_DEFERRED);
       const storedDurations = localStorage.getItem(STORAGE_DURATIONS);
       if (storedData) savedData = JSON.parse(storedData) as Tournees;
       if (storedProgress) savedProgress = JSON.parse(storedProgress) as Progress;
+      if (storedDeferred) {
+        savedDeferred = JSON.parse(storedDeferred) as DeferredPatients;
+      }
       if (storedDurations) {
         savedDurations = JSON.parse(storedDurations) as DurationHistory;
       }
@@ -192,6 +226,7 @@ export function TourneeApp() {
       if (cancelled) return;
       if (savedData) setTournees(savedData);
       if (savedProgress) setProgress(savedProgress);
+      if (savedDeferred) setDeferredPatients(savedDeferred);
       if (savedDurations) setDurationHistory(savedDurations);
       if (savedRoute) setSelectedRoute(savedRoute);
       setHydrated(true);
@@ -221,6 +256,11 @@ export function TourneeApp() {
 
   useEffect(() => {
     if (!hydrated) return;
+    localStorage.setItem(STORAGE_DEFERRED, JSON.stringify(deferredPatients));
+  }, [deferredPatients, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     localStorage.setItem(STORAGE_DURATIONS, JSON.stringify(durationHistory));
   }, [durationHistory, hydrated]);
 
@@ -239,15 +279,22 @@ export function TourneeApp() {
 
   const activePatients = tournees[selectedRoute];
   const completedIds = progress[selectedRoute] ?? [];
-  const activePatient =
-    activePatients.find((patient) => patient.id === activePatientId) ??
-    activePatients.find((patient) => !completedIds.includes(patient.id)) ??
-    null;
+  const deferredIds = deferredPatients[selectedRoute] ?? [];
+  const activePatient = activePatientId
+    ? activePatients.find(
+        (patient) =>
+          patient.id === activePatientId &&
+          !completedIds.includes(patient.id),
+      ) ?? null
+    : null;
   const activeIndex = activePatient
     ? activePatients.findIndex((patient) => patient.id === activePatient.id)
     : -1;
+  const completedCount = activePatients.filter((patient) =>
+    completedIds.includes(patient.id),
+  ).length;
   const routeComplete =
-    activePatients.length > 0 && completedIds.length >= activePatients.length;
+    activePatients.length > 0 && completedCount >= activePatients.length;
 
   const summaries = useMemo(
     () => ({
@@ -270,13 +317,17 @@ export function TourneeApp() {
   );
 
   function openTournee(route: TourneeId) {
-    const firstPatient = tournees[route].find(
-      (patient) => !(progress[route] ?? []).includes(patient.id),
+    const firstPatient = nextPatientInOriginalOrder(
+      tournees[route],
+      progress[route] ?? [],
+      deferredPatients[route] ?? [],
     );
     setSelectedRoute(route);
     setActivePatientId(firstPatient?.id ?? null);
     setCareStartedAt(null);
     setElapsedSeconds(0);
+    setPatientListOpen(false);
+    setNavigationPrompt(null);
     setScreen("tournee");
     window.scrollTo({ top: 0 });
   }
@@ -298,14 +349,25 @@ export function TourneeApp() {
       [selectedRoute]: updatedCompleted,
     }));
 
-    const next = activePatients.find(
-      (patient, index) =>
-        index > activeIndex && !updatedCompleted.includes(patient.id),
+    const updatedDeferred = deferredIds.filter(
+      (patientId) => patientId !== activePatient.id,
+    );
+    setDeferredPatients((current) => ({
+      ...current,
+      [selectedRoute]: updatedDeferred,
+    }));
+
+    const next = nextPatientInOriginalOrder(
+      activePatients,
+      updatedCompleted,
+      updatedDeferred,
     );
     setActivePatientId(next?.id ?? null);
     setCareStartedAt(null);
     setElapsedSeconds(0);
-    setNavigationPrompt(next ?? null);
+    setNavigationPrompt(
+      next ? { patient: next, reason: "completed" } : null,
+    );
   }
 
   function startCare() {
@@ -313,16 +375,71 @@ export function TourneeApp() {
     setCareStartedAt(Date.now());
   }
 
+  function deferActivePatient() {
+    if (!activePatient) return;
+
+    const updatedDeferred = Array.from(
+      new Set([...deferredIds, activePatient.id]),
+    );
+    setDeferredPatients((current) => ({
+      ...current,
+      [selectedRoute]: updatedDeferred,
+    }));
+
+    const next = nextPatientInOriginalOrder(
+      activePatients,
+      completedIds,
+      updatedDeferred,
+      activePatient.id,
+    );
+    setActivePatientId(next?.id ?? null);
+    setCareStartedAt(null);
+    setElapsedSeconds(0);
+    setNavigationPrompt(
+      next ? { patient: next, reason: "deferred" } : null,
+    );
+  }
+
+  function selectPatient(patient: Patient) {
+    if (completedIds.includes(patient.id)) return;
+
+    if (activePatient?.id === patient.id) {
+      setPatientListOpen(false);
+      return;
+    }
+
+    if (
+      careStartedAt !== null &&
+      activePatient?.id !== patient.id &&
+      !window.confirm(
+        "Un soin est chronométré. Changer de patient annulera ce chronométrage. Continuer ?",
+      )
+    ) {
+      return;
+    }
+
+    setActivePatientId(patient.id);
+    setCareStartedAt(null);
+    setElapsedSeconds(0);
+    setPatientListOpen(false);
+    setNavigationPrompt({ patient, reason: "selected" });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   function resetRoute(route: TourneeId) {
     setProgress((current) => ({ ...current, [route]: [] }));
+    setDeferredPatients((current) => ({ ...current, [route]: [] }));
     setActivePatientId(tournees[route][0]?.id ?? null);
     setCareStartedAt(null);
     setElapsedSeconds(0);
+    setNavigationPrompt(null);
   }
 
   function resetDemo() {
     setTournees(DEMO_TOURNEES);
     setProgress(EMPTY_PROGRESS);
+    setDeferredPatients(EMPTY_DEFERRED);
+    setActivePatientId(null);
     setCareStartedAt(null);
     setElapsedSeconds(0);
     setImportMessage("Les données fictives de démonstration ont été restaurées.");
@@ -373,6 +490,8 @@ export function TourneeApp() {
 
       setTournees(imported);
       setProgress(EMPTY_PROGRESS);
+      setDeferredPatients(EMPTY_DEFERRED);
+      setActivePatientId(null);
       setCareStartedAt(null);
       setElapsedSeconds(0);
       setImportMessage(
@@ -483,9 +602,17 @@ export function TourneeApp() {
 
   if (screen === "tournee") {
     const routeSummary = summaries[selectedRoute];
-    const completeCount = Math.min(completedIds.length, activePatients.length);
+    const completeCount = completedCount;
+    const remainingCount = activePatients.length - completeCount;
     const activeEstimate = activePatient
       ? estimatedDuration(activePatient, durationHistory)
+      : null;
+    const nextDefaultPatient = activePatient
+      ? nextPatientInOriginalOrder(
+          activePatients,
+          [...completedIds, activePatient.id],
+          deferredIds.filter((patientId) => patientId !== activePatient.id),
+        )
       : null;
 
     return (
@@ -504,6 +631,15 @@ export function TourneeApp() {
               {completeCount}/{activePatients.length} terminés
             </strong>
           </div>
+          <button
+            className="patient-list-button"
+            type="button"
+            onClick={() => setPatientListOpen(true)}
+            aria-label={`Afficher la liste, ${remainingCount} patient${remainingCount > 1 ? "s" : ""} restant${remainingCount > 1 ? "s" : ""}`}
+          >
+            <span aria-hidden="true">☷</span>
+            Liste
+          </button>
         </header>
 
         <div className="progress-track" aria-hidden="true">
@@ -523,7 +659,7 @@ export function TourneeApp() {
               Importer les patients
             </button>
           </section>
-        ) : routeComplete || !activePatient ? (
+        ) : routeComplete ? (
           <section className="complete-state">
             <span className="complete-symbol" aria-hidden="true">✓</span>
             <p className="eyebrow">Tournée terminée</p>
@@ -538,16 +674,39 @@ export function TourneeApp() {
               Recommencer cette tournée
             </button>
           </section>
+        ) : !activePatient ? (
+          <section className="complete-state revisit-state">
+            <span className="complete-symbol revisit-symbol" aria-hidden="true">↻</span>
+            <p className="eyebrow">À revoir plus tard</p>
+            <h1>La tournée est en pause.</h1>
+            <p>
+              {remainingCount} patient{remainingCount > 1 ? "s" : ""} reste{remainingCount > 1 ? "nt" : ""} à voir.
+            </p>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => setPatientListOpen(true)}
+            >
+              Choisir un patient
+            </button>
+            <button className="text-button" onClick={() => setScreen("accueil") }>
+              Revenir à l’accueil
+            </button>
+          </section>
         ) : (
           <>
             <section className="patient-stage">
               <div className="patient-count">
-                Patient {completeCount + 1} sur {activePatients.length}
+                Ordre initial · patient {activeIndex + 1} sur {activePatients.length}
               </div>
               <article className="patient-card">
                 <div className="patient-heading">
                   <div>
-                    <p>Maintenant</p>
+                    <p>
+                      {deferredIds.includes(activePatient.id)
+                        ? "À revoir"
+                        : "Maintenant"}
+                    </p>
                     <h1>{activePatient.nom}</h1>
                   </div>
                   <div className="duration-estimate">
@@ -582,11 +741,11 @@ export function TourneeApp() {
                 </div>
               </article>
 
-              {activeIndex < activePatients.length - 1 && (
+              {nextDefaultPatient && (
                 <div className="next-preview">
-                  <span>Ensuite</span>
-                  <strong>{activePatients[activeIndex + 1].nom}</strong>
-                  <small>{activePatients[activeIndex + 1].soin}</small>
+                  <span>Par défaut ensuite</span>
+                  <strong>{nextDefaultPatient.nom}</strong>
+                  <small>{nextDefaultPatient.soin}</small>
                 </div>
               )}
             </section>
@@ -605,10 +764,20 @@ export function TourneeApp() {
                 </span>
               </a>
               {careStartedAt === null ? (
-                <button className="start-care-button" type="button" onClick={startCare}>
-                  <span aria-hidden="true">▶</span>
-                  Commencer le soin
-                </button>
+                <div className="patient-action-row">
+                  <button className="start-care-button" type="button" onClick={startCare}>
+                    <span aria-hidden="true">▶</span>
+                    Commencer le soin
+                  </button>
+                  <button
+                    className="not-seen-button"
+                    type="button"
+                    onClick={deferActivePatient}
+                  >
+                    <span aria-hidden="true">↻</span>
+                    Patient non vu
+                  </button>
+                </div>
               ) : (
                 <>
                   <div className="care-timer" role="timer" aria-live="off">
@@ -626,6 +795,74 @@ export function TourneeApp() {
           </>
         )}
 
+        {patientListOpen && (
+          <div className="modal-backdrop" role="presentation">
+            <section
+              className="patient-list-sheet"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="patient-list-title"
+            >
+              <span className="sheet-handle" aria-hidden="true" />
+              <header className="patient-list-heading">
+                <div>
+                  <p className="eyebrow">Tournée du {selectedRoute}</p>
+                  <h2 id="patient-list-title">Choisir un patient</h2>
+                </div>
+                <button
+                  className="close-sheet-button"
+                  type="button"
+                  onClick={() => setPatientListOpen(false)}
+                  aria-label="Fermer la liste"
+                >
+                  ×
+                </button>
+              </header>
+              <p className="patient-list-help">
+                Après ce patient, l’application reprendra le premier passage
+                restant dans l’ordre initial.
+              </p>
+              <ol className="patient-list">
+                {activePatients.map((patient, index) => {
+                  const isCompleted = completedIds.includes(patient.id);
+                  const isDeferred = deferredIds.includes(patient.id);
+                  const isActive = activePatient?.id === patient.id;
+                  const status = isCompleted
+                    ? "Terminé"
+                    : isActive
+                      ? careStartedAt === null
+                        ? "Maintenant"
+                        : "Soin en cours"
+                      : isDeferred
+                        ? "À revoir"
+                        : "À faire";
+
+                  return (
+                    <li key={patient.id}>
+                      <button
+                        className={`patient-list-item${isActive ? " is-active" : ""}${isDeferred ? " is-deferred" : ""}${isCompleted ? " is-completed" : ""}`}
+                        type="button"
+                        onClick={() => selectPatient(patient)}
+                        disabled={isCompleted}
+                        aria-label={`${index + 1}. ${patient.nom}, ${status}`}
+                      >
+                        <span className="patient-order" aria-hidden="true">
+                          {isCompleted ? "✓" : index + 1}
+                        </span>
+                        <span className="patient-list-copy">
+                          <strong>{patient.nom}</strong>
+                          <small>{patient.adresse}</small>
+                        </span>
+                        <span className="patient-status">{status}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          </div>
+        )}
+
         {navigationPrompt && (
           <div className="modal-backdrop" role="presentation">
             <section
@@ -635,13 +872,25 @@ export function TourneeApp() {
               aria-labelledby="next-patient-title"
             >
               <span className="sheet-handle" aria-hidden="true" />
-              <div className="next-ready" aria-hidden="true">✓</div>
-              <p className="eyebrow">Soin enregistré</p>
-              <h2 id="next-patient-title">Prochain patient : {navigationPrompt.nom}</h2>
-              <p>{navigationPrompt.adresse}</p>
+              <div className="next-ready" aria-hidden="true">
+                {navigationPrompt.reason === "selected" ? "↗" : "✓"}
+              </div>
+              <p className="eyebrow">
+                {navigationPrompt.reason === "completed"
+                  ? "Soin enregistré"
+                  : navigationPrompt.reason === "deferred"
+                    ? "Patient reporté"
+                    : "Patient sélectionné"}
+              </p>
+              <h2 id="next-patient-title">
+                {navigationPrompt.reason === "selected"
+                  ? navigationPrompt.patient.nom
+                  : `Prochain patient : ${navigationPrompt.patient.nom}`}
+              </h2>
+              <p>{navigationPrompt.patient.adresse}</p>
               <a
                 className="navigate-button sheet-navigate"
-                href={appleMapsUrl(navigationPrompt.adresse)}
+                href={appleMapsUrl(navigationPrompt.patient.adresse)}
                 target="_blank"
                 rel="noreferrer"
                 autoFocus
@@ -718,8 +967,11 @@ export function TourneeApp() {
             progress[route]?.length ?? 0,
             tournees[route].length,
           );
+          const deferred = tournees[route].filter((patient) =>
+            (deferredPatients[route] ?? []).includes(patient.id),
+          ).length;
           const isComplete = summary.patients > 0 && completed === summary.patients;
-          const hasStarted = completed > 0 && !isComplete;
+          const hasStarted = (completed > 0 || deferred > 0) && !isComplete;
 
           return (
             <article className={`route-card route-${route}`} key={route}>
@@ -736,6 +988,8 @@ export function TourneeApp() {
                 <span className={`status-pill ${isComplete ? "done-status" : ""}`}>
                   {isComplete
                     ? "Terminée"
+                    : deferred > 0
+                      ? `${completed} fait${completed > 1 ? "s" : ""} · ${deferred} à revoir`
                     : hasStarted
                       ? `${completed}/${summary.patients} faits`
                       : `Départ ${config.start}`}

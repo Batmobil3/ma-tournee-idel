@@ -14,6 +14,9 @@ Toutes les données fournies dans ce dépôt sont fictives. Les fichiers import�
 - apprentissage local de la durée moyenne sur les 5 derniers passages ;
 - ouverture d’Apple Plans, compatible avec l’affichage CarPlay ;
 - passage immédiat au patient suivant après « Soin terminé » ;
+- bouton « Patient non vu » pour reporter un passage à la fin de la tournée ;
+- liste complète accessible pendant la tournée pour choisir un patient hors ordre ;
+- reprise automatique de la chronologie initiale après un passage choisi manuellement ;
 - installation sur l’écran d’accueil de l’iPhone et fonctionnement hors ligne ;
 - interface responsive avec de grandes zones tactiles.
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = "ma-tournee-idel-v1";
+const CACHE_NAME = "ma-tournee-idel-v2";
 const scope = self.registration.scope;
 const shellFiles = [
   scope,

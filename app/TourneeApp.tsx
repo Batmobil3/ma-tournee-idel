@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   appleMapsUrl,
   DEMO_TOURNEES,
@@ -10,6 +10,20 @@ import {
   TourneeId,
   Tournees,
 } from "./tournee-data";
+import {
+  appendTransmission,
+  GoogleSyncConfig,
+  isGoogleSyncConfigured,
+  loadGoogleSyncConfig,
+  loadSharedSheet,
+  markTransmissionRead,
+  NurseName,
+  requestGoogleAccessToken,
+  SheetRowReferences,
+  Transmission,
+  TransmissionPriority,
+  updatePatientFile,
+} from "./google-sheets";
 
 type Screen = "accueil" | "tournee" | "import";
 type Progress = Record<TourneeId, string[]>;
@@ -24,8 +38,13 @@ const STORAGE_DATA = "ma-tournee-idel:data:v1";
 const STORAGE_PROGRESS = "ma-tournee-idel:progress:v1";
 const STORAGE_DEFERRED = "ma-tournee-idel:deferred:v1";
 const STORAGE_DURATIONS = "ma-tournee-idel:durations:v1";
+const STORAGE_NURSE = "ma-tournee-idel:nurse:v1";
 const EMPTY_PROGRESS: Progress = { matin: [], soir: [] };
 const EMPTY_DEFERRED: DeferredPatients = { matin: [], soir: [] };
+const EMPTY_ROW_REFERENCES: SheetRowReferences = {
+  ficheRowByPatientId: {},
+  importRowsByPatientId: {},
+};
 
 function createId(route: TourneeId, index: number) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -83,6 +102,17 @@ function formatTimer(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatTransmissionDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function nextPatientInOriginalOrder(
@@ -191,8 +221,75 @@ export function TourneeApp() {
   const [importMessage, setImportMessage] = useState<string>("");
   const [importError, setImportError] = useState<string>("");
   const [isImporting, setIsImporting] = useState(false);
+  const [googleConfig, setGoogleConfig] = useState<GoogleSyncConfig | null>(null);
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+  const [googleSyncStatus, setGoogleSyncStatus] = useState<
+    "loading" | "unconfigured" | "disconnected" | "connecting" | "syncing" | "synced" | "error"
+  >("loading");
+  const [googleSyncMessage, setGoogleSyncMessage] = useState("");
+  const [googleSyncError, setGoogleSyncError] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
+  const [nurseName, setNurseName] = useState<NurseName | null>(null);
+  const [transmissions, setTransmissions] = useState<Transmission[]>([]);
+  const [sheetRowReferences, setSheetRowReferences] =
+    useState<SheetRowReferences>(EMPTY_ROW_REFERENCES);
+  const [transmissionMessage, setTransmissionMessage] = useState("");
+  const [transmissionCategory, setTransmissionCategory] = useState("Autre");
+  const [transmissionPriority, setTransmissionPriority] =
+    useState<TransmissionPriority>("Normale");
+  const [transmissionUpdatesFile, setTransmissionUpdatesFile] = useState(false);
+  const [transmissionTargetField, setTransmissionTargetField] = useState("soin");
+  const [transmissionNewValue, setTransmissionNewValue] = useState("");
+  const [isSavingTransmission, setIsSavingTransmission] = useState(false);
+  const [transmissionError, setTransmissionError] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const googleTokenExpiresAt = useRef(0);
+
+  const syncFromGoogle = useCallback(
+    async (tokenOverride?: string, configOverride?: GoogleSyncConfig) => {
+      const token = tokenOverride ?? googleAccessToken;
+      const config = configOverride ?? googleConfig;
+      if (!token || !config || !isGoogleSyncConfigured(config)) return;
+
+      setGoogleSyncStatus("syncing");
+      setGoogleSyncError("");
+      try {
+        const snapshot = await loadSharedSheet(token, config.spreadsheetId);
+        setTournees(snapshot.tournees);
+        setTransmissions(snapshot.transmissions);
+        setSheetRowReferences(snapshot.rowReferences);
+        setProgress((current) => ({
+          matin: current.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: current.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        }));
+        setDeferredPatients((current) => ({
+          matin: current.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: current.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        }));
+        setLastSyncAt(new Date());
+        setGoogleSyncStatus("synced");
+        setGoogleSyncMessage(
+          `${snapshot.tournees.matin.length + snapshot.tournees.soir.length} passages synchronisés avec Google Drive.`,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "La synchronisation a échoué.";
+        setGoogleSyncError(message);
+        setGoogleSyncStatus(/expiré|401/i.test(message) ? "disconnected" : "error");
+        if (/expiré|401/i.test(message)) setGoogleAccessToken(null);
+      }
+    },
+    [googleAccessToken, googleConfig],
+  );
 
   useEffect(() => {
     let savedData: Tournees | null = null;
@@ -200,6 +297,7 @@ export function TourneeApp() {
     let savedDeferred: DeferredPatients | null = null;
     let savedDurations: DurationHistory | null = null;
     let savedRoute: TourneeId | null = null;
+    let savedNurse: NurseName | null = null;
     let cancelled = false;
 
     try {
@@ -207,6 +305,7 @@ export function TourneeApp() {
       const storedProgress = localStorage.getItem(STORAGE_PROGRESS);
       const storedDeferred = localStorage.getItem(STORAGE_DEFERRED);
       const storedDurations = localStorage.getItem(STORAGE_DURATIONS);
+      const storedNurse = localStorage.getItem(STORAGE_NURSE);
       if (storedData) savedData = JSON.parse(storedData) as Tournees;
       if (storedProgress) savedProgress = JSON.parse(storedProgress) as Progress;
       if (storedDeferred) {
@@ -214,6 +313,9 @@ export function TourneeApp() {
       }
       if (storedDurations) {
         savedDurations = JSON.parse(storedDurations) as DurationHistory;
+      }
+      if (storedNurse === "Manon" || storedNurse === "Aurore") {
+        savedNurse = storedNurse;
       }
 
       const route = new URLSearchParams(window.location.search).get("tournee");
@@ -229,8 +331,27 @@ export function TourneeApp() {
       if (savedDeferred) setDeferredPatients(savedDeferred);
       if (savedDurations) setDurationHistory(savedDurations);
       if (savedRoute) setSelectedRoute(savedRoute);
+      if (savedNurse) setNurseName(savedNurse);
       setHydrated(true);
     });
+
+    loadGoogleSyncConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setGoogleConfig(config);
+        setGoogleSyncStatus(
+          isGoogleSyncConfigured(config) ? "disconnected" : "unconfigured",
+        );
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setGoogleSyncStatus("error");
+        setGoogleSyncError(
+          error instanceof Error
+            ? error.message
+            : "La configuration Google n’a pas pu être chargée.",
+        );
+      });
 
     if ("serviceWorker" in navigator) {
       const serviceWorkerUrl = new URL("sw.js", document.baseURI);
@@ -265,6 +386,34 @@ export function TourneeApp() {
   }, [durationHistory, hydrated]);
 
   useEffect(() => {
+    if (!hydrated || !nurseName) return;
+    localStorage.setItem(STORAGE_NURSE, nurseName);
+  }, [nurseName, hydrated]);
+
+  useEffect(() => {
+    if (!googleAccessToken || !googleConfig) return;
+
+    const refresh = () => {
+      if (Date.now() >= googleTokenExpiresAt.current - 30_000) {
+        setGoogleAccessToken(null);
+        setGoogleSyncStatus("disconnected");
+        setGoogleSyncMessage("Reconnectez Google pour reprendre la synchronisation.");
+        return;
+      }
+      void syncFromGoogle();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const timer = window.setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [googleAccessToken, googleConfig, syncFromGoogle]);
+
+  useEffect(() => {
     if (careStartedAt === null) return;
 
     const updateTimer = () => {
@@ -287,6 +436,24 @@ export function TourneeApp() {
           !completedIds.includes(patient.id),
       ) ?? null
     : null;
+  const activePatientTransmissions = activePatient
+    ? transmissions
+        .filter(
+          (transmission) =>
+            transmission.patientId === activePatient.id &&
+            transmission.status !== "Archivée",
+        )
+        .slice(-5)
+        .reverse()
+    : [];
+  const unreadTransmissionCount = activePatientTransmissions.filter(
+    (transmission) =>
+      nurseName === "Manon"
+        ? !transmission.readByManon
+        : nurseName === "Aurore"
+          ? !transmission.readByAurore
+          : false,
+  ).length;
   const activeIndex = activePatient
     ? activePatients.findIndex((patient) => patient.id === activePatient.id)
     : -1;
@@ -446,6 +613,126 @@ export function TourneeApp() {
     setImportError("");
   }
 
+  async function connectGoogle() {
+    if (!nurseName) {
+      setGoogleSyncError("Choisissez d’abord Manon ou Aurore.");
+      return;
+    }
+    if (!googleConfig || !isGoogleSyncConfigured(googleConfig)) {
+      setGoogleSyncStatus("unconfigured");
+      setGoogleSyncError(
+        "La feuille Google et l’autorisation de l’application doivent encore être configurées.",
+      );
+      return;
+    }
+
+    setGoogleSyncStatus("connecting");
+    setGoogleSyncError("");
+    try {
+      const token = await requestGoogleAccessToken(googleConfig.clientId);
+      googleTokenExpiresAt.current = token.expiresAt;
+      setGoogleAccessToken(token.accessToken);
+      await syncFromGoogle(token.accessToken, googleConfig);
+    } catch (error) {
+      setGoogleSyncStatus("error");
+      setGoogleSyncError(
+        error instanceof Error ? error.message : "La connexion Google a échoué.",
+      );
+    }
+  }
+
+  async function saveTransmission() {
+    const message = transmissionMessage.trim();
+    if (!activePatient || !message) {
+      setTransmissionError("Écrivez la transmission avant de l’envoyer.");
+      return;
+    }
+    if (!nurseName || !googleAccessToken || !googleConfig) {
+      setTransmissionError(
+        "Connectez Google Drive depuis l’écran Synchroniser avant d’envoyer.",
+      );
+      return;
+    }
+    const newValue = transmissionNewValue.trim() || message;
+    if (transmissionUpdatesFile && !newValue) {
+      setTransmissionError("Indiquez la nouvelle information de la fiche.");
+      return;
+    }
+
+    setIsSavingTransmission(true);
+    setTransmissionError("");
+    try {
+      await appendTransmission(googleAccessToken, googleConfig.spreadsheetId, {
+        patient: activePatient,
+        route: selectedRoute,
+        author: nurseName,
+        category: transmissionCategory,
+        priority: transmissionPriority,
+        message,
+        updateFile: transmissionUpdatesFile,
+        targetField: transmissionUpdatesFile ? transmissionTargetField : "",
+        newValue: transmissionUpdatesFile ? newValue : "",
+      });
+      if (transmissionUpdatesFile) {
+        await updatePatientFile(
+          googleAccessToken,
+          googleConfig.spreadsheetId,
+          sheetRowReferences,
+          activePatient.id,
+          selectedRoute,
+          transmissionTargetField,
+          newValue,
+          nurseName,
+        );
+      }
+      setTransmissionMessage("");
+      setTransmissionNewValue("");
+      setTransmissionUpdatesFile(false);
+      setTransmissionPriority("Normale");
+      await syncFromGoogle();
+    } catch (error) {
+      setTransmissionError(
+        error instanceof Error
+          ? error.message
+          : "La transmission n’a pas pu être enregistrée.",
+      );
+    } finally {
+      setIsSavingTransmission(false);
+    }
+  }
+
+  async function markAsRead(transmission: Transmission) {
+    if (!nurseName || !googleAccessToken || !googleConfig) return;
+    setTransmissionError("");
+    try {
+      await markTransmissionRead(
+        googleAccessToken,
+        googleConfig.spreadsheetId,
+        transmission.sheetRow,
+        nurseName,
+      );
+      setTransmissions((current) =>
+        current.map((item) =>
+          item.id === transmission.id
+            ? {
+                ...item,
+                readByManon:
+                  nurseName === "Manon" ? true : item.readByManon,
+                readByAurore:
+                  nurseName === "Aurore" ? true : item.readByAurore,
+              }
+            : item,
+        ),
+      );
+    } catch (error) {
+      setTransmissionError(
+        error instanceof Error
+          ? error.message
+          : "La transmission n’a pas pu être marquée comme lue.",
+      );
+    }
+  }
+
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -525,13 +812,85 @@ export function TourneeApp() {
         </header>
 
         <section className="page-intro">
-          <p className="eyebrow">Préparer la journée</p>
-          <h1>Importer les patients</h1>
+          <p className="eyebrow">Manon & Aurore</p>
+          <h1>Synchroniser la tournée</h1>
           <p>
-            Un seul fichier pour les tournées du matin et du soir. Les données
-            restent uniquement sur cet appareil.
+            La feuille Google Drive partagée met automatiquement à jour les
+            tournées, les fiches et les transmissions.
           </p>
         </section>
+
+        <section className="google-sync-card" aria-labelledby="google-sync-title">
+          <div className="sync-card-heading">
+            <span
+              className={`sync-status-dot sync-${googleSyncStatus}`}
+              aria-hidden="true"
+            />
+            <div>
+              <p className="eyebrow">Google Sheets</p>
+              <h2 id="google-sync-title">
+                {googleSyncStatus === "synced"
+                  ? "Tournée synchronisée"
+                  : googleSyncStatus === "unconfigured"
+                    ? "Configuration en préparation"
+                    : "Connecter la feuille partagée"}
+              </h2>
+            </div>
+          </div>
+
+          <p className="sync-description">
+            Choisissez votre prénom sur cet iPhone. Ce choix est mémorisé pour
+            identifier les transmissions et les lectures.
+          </p>
+          <div className="nurse-selector" role="group" aria-label="Choisir l’infirmière">
+            {(["Manon", "Aurore"] as NurseName[]).map((name) => (
+              <button
+                key={name}
+                type="button"
+                className={nurseName === name ? "is-selected" : ""}
+                onClick={() => setNurseName(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+
+          {googleSyncMessage && !googleSyncError && (
+            <div className="sync-note sync-note-success" role="status">
+              <strong>{googleSyncMessage}</strong>
+              {lastSyncAt && (
+                <span>
+                  Dernière mise à jour à {lastSyncAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+            </div>
+          )}
+          {googleSyncError && (
+            <div className="sync-note sync-note-error" role="alert">
+              {googleSyncError}
+            </div>
+          )}
+
+          <button
+            className="google-connect-button"
+            type="button"
+            onClick={googleSyncStatus === "synced" ? () => void syncFromGoogle() : () => void connectGoogle()}
+            disabled={googleSyncStatus === "connecting" || googleSyncStatus === "syncing"}
+          >
+            {googleSyncStatus === "connecting"
+              ? "Connexion Google…"
+              : googleSyncStatus === "syncing"
+                ? "Synchronisation…"
+                : googleSyncStatus === "synced"
+                  ? "Actualiser maintenant"
+                  : "Se connecter avec Google"}
+          </button>
+          {googleConfig?.spreadsheetName && (
+            <small className="sheet-name">{googleConfig.spreadsheetName}</small>
+          )}
+        </section>
+
+        <div className="manual-divider"><span>Secours hors connexion</span></div>
 
         <section className="import-card" aria-labelledby="import-title">
           <div className="file-mark" aria-hidden="true">
@@ -539,8 +898,8 @@ export function TourneeApp() {
             <span>+</span>
             XLSX
           </div>
-          <h2 id="import-title">Choisir un fichier</h2>
-          <p>La première feuille sera importée et remplacera la tournée actuelle.</p>
+          <h2 id="import-title">Importer manuellement</h2>
+          <p>Utilisez un fichier seulement si Google Drive est indisponible.</p>
           <label className={`file-button ${isImporting ? "is-loading" : ""}`}>
             <input
               ref={fileInputRef}
@@ -739,6 +1098,150 @@ export function TourneeApp() {
                   <span>Notes</span>
                   <p>{activePatient.notes || "Aucune note pour ce patient."}</p>
                 </div>
+
+                <section className="patient-transmissions" aria-labelledby="transmissions-title">
+                  <div className="transmissions-heading">
+                    <div>
+                      <span>Partagé Manon / Aurore</span>
+                      <h2 id="transmissions-title">Transmissions</h2>
+                    </div>
+                    {unreadTransmissionCount > 0 && (
+                      <strong>{unreadTransmissionCount} non lue{unreadTransmissionCount > 1 ? "s" : ""}</strong>
+                    )}
+                  </div>
+
+                  {!googleAccessToken ? (
+                    <button
+                      className="transmission-connect"
+                      type="button"
+                      onClick={() => setScreen("import")}
+                    >
+                      Connecter Google Drive pour voir et ajouter les transmissions
+                    </button>
+                  ) : (
+                    <>
+                      {activePatientTransmissions.length === 0 ? (
+                        <p className="no-transmission">Aucune transmission active.</p>
+                      ) : (
+                        <div className="transmission-list">
+                          {activePatientTransmissions.map((transmission) => {
+                            const isUnread =
+                              nurseName === "Manon"
+                                ? !transmission.readByManon
+                                : nurseName === "Aurore"
+                                  ? !transmission.readByAurore
+                                  : false;
+                            return (
+                              <article
+                                className={`transmission-item priority-${transmission.priority.toLowerCase()}${isUnread ? " is-unread" : ""}`}
+                                key={transmission.id}
+                              >
+                                <div className="transmission-meta">
+                                  <strong>{transmission.author}</strong>
+                                  <span>{transmission.priority}</span>
+                                  <time>{formatTransmissionDate(transmission.dateTime)}</time>
+                                </div>
+                                <p>{transmission.message}</p>
+                                {isUnread && (
+                                  <button type="button" onClick={() => void markAsRead(transmission)}>
+                                    Marquer comme lue
+                                  </button>
+                                )}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className="transmission-form">
+                        <label>
+                          Nouvelle transmission
+                          <textarea
+                            value={transmissionMessage}
+                            onChange={(event) => setTransmissionMessage(event.target.value)}
+                            placeholder="Information à transmettre à la collègue…"
+                            rows={3}
+                          />
+                        </label>
+                        <div className="transmission-options">
+                          <label>
+                            Catégorie
+                            <select
+                              value={transmissionCategory}
+                              onChange={(event) => setTransmissionCategory(event.target.value)}
+                            >
+                              <option>Soin</option>
+                              <option>Traitement</option>
+                              <option>Accès</option>
+                              <option>Rendez-vous</option>
+                              <option>Matériel</option>
+                              <option>Autre</option>
+                            </select>
+                          </label>
+                          <label>
+                            Priorité
+                            <select
+                              value={transmissionPriority}
+                              onChange={(event) =>
+                                setTransmissionPriority(event.target.value as TransmissionPriority)
+                              }
+                            >
+                              <option>Normale</option>
+                              <option>Importante</option>
+                              <option>Urgente</option>
+                            </select>
+                          </label>
+                        </div>
+                        <label className="update-file-toggle">
+                          <input
+                            type="checkbox"
+                            checked={transmissionUpdatesFile}
+                            onChange={(event) => setTransmissionUpdatesFile(event.target.checked)}
+                          />
+                          <span>
+                            <strong>Mettre aussi à jour la fiche</strong>
+                            <small>La collègue verra la nouvelle consigne dans la tournée.</small>
+                          </span>
+                        </label>
+                        {transmissionUpdatesFile && (
+                          <div className="file-update-fields">
+                            <label>
+                              Information à remplacer
+                              <select
+                                value={transmissionTargetField}
+                                onChange={(event) => setTransmissionTargetField(event.target.value)}
+                              >
+                                <option value="soin">Soin de cette tournée</option>
+                                <option value="notes_permanentes">Notes permanentes</option>
+                                <option value="adresse">Adresse</option>
+                              </select>
+                            </label>
+                            <label>
+                              Nouvelle valeur complète
+                              <textarea
+                                value={transmissionNewValue}
+                                onChange={(event) => setTransmissionNewValue(event.target.value)}
+                                placeholder="Si vide, le texte de la transmission sera utilisé."
+                                rows={3}
+                              />
+                            </label>
+                          </div>
+                        )}
+                        {transmissionError && (
+                          <p className="transmission-error" role="alert">{transmissionError}</p>
+                        )}
+                        <button
+                          className="send-transmission-button"
+                          type="button"
+                          onClick={() => void saveTransmission()}
+                          disabled={isSavingTransmission}
+                        >
+                          {isSavingTransmission ? "Enregistrement…" : `Envoyer comme ${nurseName ?? "infirmière"}`}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </section>
               </article>
 
               {nextDefaultPatient && (
@@ -925,7 +1428,7 @@ export function TourneeApp() {
           type="button"
           onClick={() => setScreen("import")}
         >
-          <span aria-hidden="true">＋</span> Importer
+          <span aria-hidden="true">↻</span> Synchroniser
         </button>
       </header>
 
@@ -938,9 +1441,35 @@ export function TourneeApp() {
           <p>Deux tournées. Un patient à la fois.</p>
         </div>
         <div className="privacy-pill">
-          <span aria-hidden="true">●</span> Données sur cet appareil
+          <span aria-hidden="true">●</span>{" "}
+          {googleSyncStatus === "synced"
+            ? `Drive connecté · ${nurseName ?? ""}`
+            : "Mode local"}
         </div>
       </section>
+
+      <button
+        className={`home-sync-banner sync-banner-${googleSyncStatus}`}
+        type="button"
+        onClick={() => setScreen("import")}
+      >
+        <span className={`sync-status-dot sync-${googleSyncStatus}`} aria-hidden="true" />
+        <span>
+          <strong>
+            {googleSyncStatus === "synced"
+              ? "Google Drive synchronisé"
+              : googleSyncStatus === "unconfigured"
+                ? "Connexion Google en préparation"
+                : "Connecter la tournée partagée"}
+          </strong>
+          <small>
+            {lastSyncAt
+              ? `Mis à jour à ${lastSyncAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`
+              : "Touchez pour ouvrir les réglages"}
+          </small>
+        </span>
+        <span aria-hidden="true">›</span>
+      </button>
 
       {importMessage && (
         <div className="home-feedback" role="status">

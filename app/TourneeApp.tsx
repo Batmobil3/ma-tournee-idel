@@ -558,49 +558,6 @@ export function TourneeApp() {
   const routeComplete =
     activePatients.length > 0 && completedCount >= activePatients.length;
 
-  useEffect(() => {
-    if (!hydrated || screen !== "tournee") return;
-
-    if (activePatient) {
-      setNavigationPrompt((current) => {
-        if (!current) return null;
-        const refreshedPatient = activePatients.find(
-          (patient) => patient.id === current.patient.id,
-        );
-        if (!refreshedPatient) return null;
-        return refreshedPatient === current.patient
-          ? current
-          : { ...current, patient: refreshedPatient };
-      });
-      return;
-    }
-
-    // Un identifiant absent signifie une pause volontaire (par exemple quand
-    // tous les patients restants ont été reportés). Seul un ancien identifiant
-    // devenu introuvable après actualisation doit être remplacé.
-    if (activePatientId === null) return;
-
-    const next = nextPatientInOriginalOrder(
-      activePatients,
-      completedIds,
-      deferredIds,
-    );
-    if ((next?.id ?? null) === activePatientId) return;
-
-    setActivePatientId(next?.id ?? null);
-    setCareStartedAt(null);
-    setElapsedSeconds(0);
-    setNavigationPrompt(null);
-  }, [
-    activePatient,
-    activePatientId,
-    activePatients,
-    completedIds,
-    deferredIds,
-    hydrated,
-    screen,
-  ]);
-
   const summaries = useMemo(
     () => ({
       matin: getTourneeSummary(

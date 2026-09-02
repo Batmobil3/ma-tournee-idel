@@ -1,4 +1,4 @@
-const CACHE_NAME = "ma-tournee-idel-v2";
+const CACHE_NAME = "ma-tournee-idel-v3";
 const scope = self.registration.scope;
 const shellFiles = [
   scope,
@@ -7,6 +7,7 @@ const shellFiles = [
   new URL("icon-512.png", scope).href,
   new URL("apple-touch-icon.png", scope).href,
   new URL("exemple-patients.csv", scope).href,
+  new URL("google-config.json", scope).href,
 ];
 
 self.addEventListener("install", (event) => {

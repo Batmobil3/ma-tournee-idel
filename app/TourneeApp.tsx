@@ -25,7 +25,7 @@ import {
   updatePatientFile,
 } from "./google-sheets";
 
-type Screen = "accueil" | "tournee" | "import";
+type Screen = "accueil" | "tournee" | "import" | "transmissions";
 type Progress = Record<TourneeId, string[]>;
 type DeferredPatients = Record<TourneeId, string[]>;
 type DurationHistory = Record<string, number[]>;
@@ -104,8 +104,50 @@ function formatTimer(totalSeconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function parseTransmissionDate(value: string, reference = new Date()) {
+  const text = value.trim();
+  const localized = text.match(
+    /^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})(?:[ T](\d{1,2})(?::(\d{2}))?)?/,
+  );
+
+  if (localized) {
+    const [, first, second, rawYear, rawHour = "0", rawMinute = "0"] = localized;
+    const year = Number(rawYear) < 100 ? 2000 + Number(rawYear) : Number(rawYear);
+    const hour = Number(rawHour);
+    const minute = Number(rawMinute);
+    const candidates = [
+      { day: Number(first), month: Number(second) },
+      { day: Number(second), month: Number(first) },
+    ]
+      .map(({ day, month }) => ({
+        day,
+        month,
+        date: new Date(year, month - 1, day, hour, minute),
+      }))
+      .filter(
+        ({ day, month, date }) =>
+          date.getFullYear() === year &&
+          date.getMonth() === month - 1 &&
+          date.getDate() === day &&
+          date.getHours() === hour &&
+          date.getMinutes() === minute,
+      )
+      .map(({ date }) => date);
+
+    if (candidates.length > 0) {
+      return candidates.sort(
+        (left, right) =>
+          Math.abs(left.getTime() - reference.getTime()) -
+          Math.abs(right.getTime() - reference.getTime()),
+      )[0];
+    }
+  }
+
+  return new Date(text);
+}
+
 function formatTransmissionDate(value: string) {
-  const parsed = new Date(value);
+  const parsed = parseTransmissionDate(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString("fr-FR", {
     day: "2-digit",
@@ -113,6 +155,33 @@ function formatTransmissionDate(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function isTransmissionFromYesterday(value: string, reference = new Date()) {
+  const parsed = parseTransmissionDate(value, reference);
+  if (Number.isNaN(parsed.getTime())) return false;
+
+  const today = new Date(reference);
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return parsed >= yesterday && parsed < today;
+}
+
+function formatYesterday(reference = new Date()) {
+  const yesterday = new Date(reference);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return yesterday.toLocaleDateString("fr-FR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
+}
+
+function isUnreadForNurse(transmission: Transmission, nurse: NurseName | null) {
+  if (nurse === "Manon") return !transmission.readByManon;
+  if (nurse === "Aurore") return !transmission.readByAurore;
+  return false;
 }
 
 function nextPatientInOriginalOrder(
@@ -241,6 +310,8 @@ export function TourneeApp() {
   const [transmissionTargetField, setTransmissionTargetField] = useState("soin");
   const [transmissionNewValue, setTransmissionNewValue] = useState("");
   const [isSavingTransmission, setIsSavingTransmission] = useState(false);
+  const [isMarkingAllTransmissions, setIsMarkingAllTransmissions] =
+    useState(false);
   const [transmissionError, setTransmissionError] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -256,62 +327,25 @@ export function TourneeApp() {
       setGoogleSyncError("");
       try {
         const snapshot = await loadSharedSheet(token, config.spreadsheetId);
-        const refreshedProgress: Progress = {
-          matin: progress.matin.filter((id) =>
-            snapshot.tournees.matin.some((patient) => patient.id === id),
-          ),
-          soir: progress.soir.filter((id) =>
-            snapshot.tournees.soir.some((patient) => patient.id === id),
-          ),
-        };
-        const refreshedDeferred: DeferredPatients = {
-          matin: deferredPatients.matin.filter((id) =>
-            snapshot.tournees.matin.some((patient) => patient.id === id),
-          ),
-          soir: deferredPatients.soir.filter((id) =>
-            snapshot.tournees.soir.some((patient) => patient.id === id),
-          ),
-        };
-
         setTournees(snapshot.tournees);
         setTransmissions(snapshot.transmissions);
         setSheetRowReferences(snapshot.rowReferences);
-        setProgress(refreshedProgress);
-        setDeferredPatients(refreshedDeferred);
-
-        if (screen === "tournee") {
-          const refreshedPatients = snapshot.tournees[selectedRoute];
-          const activePatientIsAvailable = Boolean(
-            activePatientId &&
-              refreshedPatients.some(
-                (patient) =>
-                  patient.id === activePatientId &&
-                  !refreshedProgress[selectedRoute].includes(patient.id),
-              ),
-          );
-
-          if (!activePatientIsAvailable) {
-            const next = nextPatientInOriginalOrder(
-              refreshedPatients,
-              refreshedProgress[selectedRoute],
-              refreshedDeferred[selectedRoute],
-            );
-            setActivePatientId(next?.id ?? null);
-            setCareStartedAt(null);
-            setElapsedSeconds(0);
-          }
-
-          setNavigationPrompt((current) => {
-            if (!current || !activePatientIsAvailable) return null;
-            const refreshedPatient = refreshedPatients.find(
-              (patient) => patient.id === current.patient.id,
-            );
-            return refreshedPatient
-              ? { ...current, patient: refreshedPatient }
-              : null;
-          });
-        }
-
+        setProgress((current) => ({
+          matin: current.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: current.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        }));
+        setDeferredPatients((current) => ({
+          matin: current.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: current.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        }));
         setLastSyncAt(new Date());
         setGoogleSyncStatus("synced");
         setGoogleSyncMessage(
@@ -325,15 +359,7 @@ export function TourneeApp() {
         if (/expiré|401/i.test(message)) setGoogleAccessToken(null);
       }
     },
-    [
-      activePatientId,
-      deferredPatients,
-      googleAccessToken,
-      googleConfig,
-      progress,
-      screen,
-      selectedRoute,
-    ],
+    [googleAccessToken, googleConfig],
   );
 
   useEffect(() => {
@@ -492,13 +518,37 @@ export function TourneeApp() {
         .reverse()
     : [];
   const unreadTransmissionCount = activePatientTransmissions.filter(
-    (transmission) =>
-      nurseName === "Manon"
-        ? !transmission.readByManon
-        : nurseName === "Aurore"
-          ? !transmission.readByAurore
-          : false,
+    (transmission) => isUnreadForNurse(transmission, nurseName),
   ).length;
+  const unreadTransmissions = useMemo(
+    () =>
+      transmissions.filter(
+        (transmission) =>
+          transmission.status !== "Archivée" &&
+          isUnreadForNurse(transmission, nurseName),
+      ),
+    [nurseName, transmissions],
+  );
+  const unreadCountByPatientId = useMemo(() => {
+    const counts = new Map<string, number>();
+    unreadTransmissions.forEach((transmission) => {
+      counts.set(
+        transmission.patientId,
+        (counts.get(transmission.patientId) ?? 0) + 1,
+      );
+    });
+    return counts;
+  }, [unreadTransmissions]);
+  const yesterdayUnreadTransmissions = unreadTransmissions
+    .filter((transmission) =>
+      isTransmissionFromYesterday(transmission.dateTime),
+    )
+    .sort(
+      (left, right) =>
+        parseTransmissionDate(right.dateTime).getTime() -
+        parseTransmissionDate(left.dateTime).getTime(),
+    );
+  const yesterdayLabel = formatYesterday();
   const activeIndex = activePatient
     ? activePatients.findIndex((patient) => patient.id === activePatient.id)
     : -1;
@@ -507,6 +557,49 @@ export function TourneeApp() {
   ).length;
   const routeComplete =
     activePatients.length > 0 && completedCount >= activePatients.length;
+
+  useEffect(() => {
+    if (!hydrated || screen !== "tournee") return;
+
+    if (activePatient) {
+      setNavigationPrompt((current) => {
+        if (!current) return null;
+        const refreshedPatient = activePatients.find(
+          (patient) => patient.id === current.patient.id,
+        );
+        if (!refreshedPatient) return null;
+        return refreshedPatient === current.patient
+          ? current
+          : { ...current, patient: refreshedPatient };
+      });
+      return;
+    }
+
+    // Un identifiant absent signifie une pause volontaire (par exemple quand
+    // tous les patients restants ont été reportés). Seul un ancien identifiant
+    // devenu introuvable après actualisation doit être remplacé.
+    if (activePatientId === null) return;
+
+    const next = nextPatientInOriginalOrder(
+      activePatients,
+      completedIds,
+      deferredIds,
+    );
+    if ((next?.id ?? null) === activePatientId) return;
+
+    setActivePatientId(next?.id ?? null);
+    setCareStartedAt(null);
+    setElapsedSeconds(0);
+    setNavigationPrompt(null);
+  }, [
+    activePatient,
+    activePatientId,
+    activePatients,
+    completedIds,
+    deferredIds,
+    hydrated,
+    screen,
+  ]);
 
   const summaries = useMemo(
     () => ({
@@ -778,6 +871,57 @@ export function TourneeApp() {
     }
   }
 
+  async function markAllYesterdayAsRead() {
+    if (
+      !nurseName ||
+      !googleAccessToken ||
+      !googleConfig ||
+      yesterdayUnreadTransmissions.length === 0
+    ) {
+      return;
+    }
+
+    setIsMarkingAllTransmissions(true);
+    setTransmissionError("");
+    const transmissionIds = new Set(
+      yesterdayUnreadTransmissions.map((transmission) => transmission.id),
+    );
+
+    try {
+      await Promise.all(
+        yesterdayUnreadTransmissions.map((transmission) =>
+          markTransmissionRead(
+            googleAccessToken,
+            googleConfig.spreadsheetId,
+            transmission.sheetRow,
+            nurseName,
+          ),
+        ),
+      );
+      setTransmissions((current) =>
+        current.map((transmission) =>
+          transmissionIds.has(transmission.id)
+            ? {
+                ...transmission,
+                readByManon:
+                  nurseName === "Manon" ? true : transmission.readByManon,
+                readByAurore:
+                  nurseName === "Aurore" ? true : transmission.readByAurore,
+              }
+            : transmission,
+        ),
+      );
+    } catch (error) {
+      setTransmissionError(
+        error instanceof Error
+          ? error.message
+          : "Les transmissions n’ont pas pu être marquées comme lues.",
+      );
+    } finally {
+      setIsMarkingAllTransmissions(false);
+    }
+  }
+
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -839,6 +983,116 @@ export function TourneeApp() {
       setIsImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  }
+
+  if (screen === "transmissions") {
+    return (
+      <main className="app-shell compact-shell transmissions-screen">
+        <header className="topbar">
+          <button
+            className="back-button"
+            type="button"
+            onClick={() => setScreen("accueil")}
+            aria-label="Retour à l’accueil"
+          >
+            <span aria-hidden="true">←</span> Retour
+          </button>
+          <Brand />
+        </header>
+
+        <section className="page-intro transmissions-page-intro">
+          <p className="eyebrow">Relève Manon & Aurore</p>
+          <h1>Transmissions de la veille</h1>
+          <p>
+            Informations encore non lues du {yesterdayLabel}. Une alerte reste
+            visible dans la liste tant que la transmission n’est pas marquée
+            comme lue.
+          </p>
+        </section>
+
+        {!googleAccessToken ? (
+          <button
+            className="transmissions-connect-card"
+            type="button"
+            onClick={() => setScreen("import")}
+          >
+            <span className="alert-symbol" aria-hidden="true">!</span>
+            <span>
+              <strong>Connecter Google Drive</strong>
+              <small>Pour afficher les transmissions de la veille</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+        ) : yesterdayUnreadTransmissions.length === 0 ? (
+          <section className="transmissions-empty" aria-live="polite">
+            <span aria-hidden="true">✓</span>
+            <h2>Tout a été lu</h2>
+            <p>Aucune nouvelle transmission de la veille.</p>
+          </section>
+        ) : (
+          <>
+            <div className="transmissions-summary" role="status">
+              <span className="alert-symbol" aria-hidden="true">!</span>
+              <strong>
+                {yesterdayUnreadTransmissions.length} nouvelle
+                {yesterdayUnreadTransmissions.length > 1 ? "s" : ""}
+              </strong>
+              <span>à lire</span>
+            </div>
+
+            <section
+              className="yesterday-transmission-list"
+              aria-label="Nouvelles transmissions de la veille"
+            >
+              {yesterdayUnreadTransmissions.map((transmission) => (
+                <article
+                  className={`transmission-item transmission-center-item priority-${transmission.priority.toLowerCase()} is-unread`}
+                  key={transmission.id}
+                >
+                  <div className="transmission-patient-heading">
+                    <span className="alert-symbol small-alert" aria-hidden="true">!</span>
+                    <div>
+                      <strong>{transmission.patientName}</strong>
+                      <small>
+                        Tournée du {transmission.tournee} · {transmission.category}
+                      </small>
+                    </div>
+                  </div>
+                  <div className="transmission-meta">
+                    <strong>{transmission.author}</strong>
+                    <span>{transmission.priority}</span>
+                    <time>{formatTransmissionDate(transmission.dateTime)}</time>
+                  </div>
+                  <p>{transmission.message}</p>
+                  <button
+                    type="button"
+                    onClick={() => void markAsRead(transmission)}
+                  >
+                    Marquer comme lue
+                  </button>
+                </article>
+              ))}
+            </section>
+
+            {transmissionError && (
+              <p className="transmission-error center-error" role="alert">
+                {transmissionError}
+              </p>
+            )}
+            <button
+              className="mark-all-transmissions-button"
+              type="button"
+              onClick={() => void markAllYesterdayAsRead()}
+              disabled={isMarkingAllTransmissions}
+            >
+              {isMarkingAllTransmissions
+                ? "Enregistrement…"
+                : "Tout marquer comme lu"}
+            </button>
+          </>
+        )}
+      </main>
+    );
   }
 
   if (screen === "import") {
@@ -1375,6 +1629,8 @@ export function TourneeApp() {
                   const isCompleted = completedIds.includes(patient.id);
                   const isDeferred = deferredIds.includes(patient.id);
                   const isActive = activePatient?.id === patient.id;
+                  const patientUnreadCount =
+                    unreadCountByPatientId.get(patient.id) ?? 0;
                   const status = isCompleted
                     ? "Terminé"
                     : isActive
@@ -1401,7 +1657,18 @@ export function TourneeApp() {
                           <strong>{patient.nom}</strong>
                           <small>{patient.adresse}</small>
                         </span>
-                        <span className="patient-status">{status}</span>
+                        <span className="patient-list-aside">
+                          {patientUnreadCount > 0 && (
+                            <span
+                              className="patient-list-alert"
+                              aria-label={`${patientUnreadCount} nouvelle${patientUnreadCount > 1 ? "s" : ""} transmission${patientUnreadCount > 1 ? "s" : ""}`}
+                            >
+                              <span aria-hidden="true">!</span>
+                              {patientUnreadCount}
+                            </span>
+                          )}
+                          <span className="patient-status">{status}</span>
+                        </span>
                       </button>
                     </li>
                   );
@@ -1522,6 +1789,72 @@ export function TourneeApp() {
           {importMessage}
         </div>
       )}
+
+      <section
+        className={`home-transmissions${yesterdayUnreadTransmissions.length > 0 ? " has-alerts" : ""}`}
+        aria-labelledby="home-transmissions-title"
+      >
+        <div className="home-transmissions-heading">
+          <div className="home-transmissions-title">
+            <span
+              className={`alert-symbol${yesterdayUnreadTransmissions.length === 0 ? " alert-symbol-clear" : ""}`}
+              aria-hidden="true"
+            >
+              {yesterdayUnreadTransmissions.length > 0 ? "!" : "✓"}
+            </span>
+            <div>
+              <p className="eyebrow">Relève · {yesterdayLabel}</p>
+              <h2 id="home-transmissions-title">Nouvelles transmissions</h2>
+            </div>
+          </div>
+          {googleAccessToken && yesterdayUnreadTransmissions.length > 0 && (
+            <span className="home-transmissions-count">
+              {yesterdayUnreadTransmissions.length}
+            </span>
+          )}
+        </div>
+
+        {!googleAccessToken ? (
+          <button
+            className="home-transmissions-connect"
+            type="button"
+            onClick={() => setScreen("import")}
+          >
+            <span>Connectez Google Drive pour afficher la relève</span>
+            <span aria-hidden="true">›</span>
+          </button>
+        ) : yesterdayUnreadTransmissions.length === 0 ? (
+          <p className="home-transmissions-empty">
+            Aucune nouvelle transmission de la veille.
+          </p>
+        ) : (
+          <div className="home-transmissions-list">
+            {yesterdayUnreadTransmissions.slice(0, 3).map((transmission) => (
+              <button
+                type="button"
+                key={transmission.id}
+                onClick={() => setScreen("transmissions")}
+                aria-label={`Voir les transmissions de la veille pour ${transmission.patientName}`}
+              >
+                <span className="small-alert" aria-hidden="true">!</span>
+                <span>
+                  <strong>{transmission.patientName}</strong>
+                  <small>{transmission.message}</small>
+                </span>
+                <span aria-hidden="true">›</span>
+              </button>
+            ))}
+            <button
+              className="view-all-transmissions"
+              type="button"
+              onClick={() => setScreen("transmissions")}
+            >
+              Voir toutes les transmissions de la veille
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        )}
+      </section>
 
       <section className="tournees-section" aria-labelledby="tournees-title">
         <div className="section-heading">

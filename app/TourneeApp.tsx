@@ -256,25 +256,62 @@ export function TourneeApp() {
       setGoogleSyncError("");
       try {
         const snapshot = await loadSharedSheet(token, config.spreadsheetId);
+        const refreshedProgress: Progress = {
+          matin: progress.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: progress.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        };
+        const refreshedDeferred: DeferredPatients = {
+          matin: deferredPatients.matin.filter((id) =>
+            snapshot.tournees.matin.some((patient) => patient.id === id),
+          ),
+          soir: deferredPatients.soir.filter((id) =>
+            snapshot.tournees.soir.some((patient) => patient.id === id),
+          ),
+        };
+
         setTournees(snapshot.tournees);
         setTransmissions(snapshot.transmissions);
         setSheetRowReferences(snapshot.rowReferences);
-        setProgress((current) => ({
-          matin: current.matin.filter((id) =>
-            snapshot.tournees.matin.some((patient) => patient.id === id),
-          ),
-          soir: current.soir.filter((id) =>
-            snapshot.tournees.soir.some((patient) => patient.id === id),
-          ),
-        }));
-        setDeferredPatients((current) => ({
-          matin: current.matin.filter((id) =>
-            snapshot.tournees.matin.some((patient) => patient.id === id),
-          ),
-          soir: current.soir.filter((id) =>
-            snapshot.tournees.soir.some((patient) => patient.id === id),
-          ),
-        }));
+        setProgress(refreshedProgress);
+        setDeferredPatients(refreshedDeferred);
+
+        if (screen === "tournee") {
+          const refreshedPatients = snapshot.tournees[selectedRoute];
+          const activePatientIsAvailable = Boolean(
+            activePatientId &&
+              refreshedPatients.some(
+                (patient) =>
+                  patient.id === activePatientId &&
+                  !refreshedProgress[selectedRoute].includes(patient.id),
+              ),
+          );
+
+          if (!activePatientIsAvailable) {
+            const next = nextPatientInOriginalOrder(
+              refreshedPatients,
+              refreshedProgress[selectedRoute],
+              refreshedDeferred[selectedRoute],
+            );
+            setActivePatientId(next?.id ?? null);
+            setCareStartedAt(null);
+            setElapsedSeconds(0);
+          }
+
+          setNavigationPrompt((current) => {
+            if (!current || !activePatientIsAvailable) return null;
+            const refreshedPatient = refreshedPatients.find(
+              (patient) => patient.id === current.patient.id,
+            );
+            return refreshedPatient
+              ? { ...current, patient: refreshedPatient }
+              : null;
+          });
+        }
+
         setLastSyncAt(new Date());
         setGoogleSyncStatus("synced");
         setGoogleSyncMessage(
@@ -288,7 +325,15 @@ export function TourneeApp() {
         if (/expiré|401/i.test(message)) setGoogleAccessToken(null);
       }
     },
-    [googleAccessToken, googleConfig],
+    [
+      activePatientId,
+      deferredPatients,
+      googleAccessToken,
+      googleConfig,
+      progress,
+      screen,
+      selectedRoute,
+    ],
   );
 
   useEffect(() => {
